@@ -25,7 +25,7 @@ Monitor the response plots during acquisition. Paired positive/negative measurem
 - `SysID_GUI.py`: excitation using corrector magnets.
 - `SysID_QM_GUI.py`: excitation using horizontal and vertical quadrupole-mover displacements, with configurable displacement ranges and target orbit excursions.
 
-The separate `random_excitation/SysID_rnd.py` script provides an experimental random-excitation version of the application.
+The separate `SysID_rnd_GUI.py` script provides an experimental random-excitation version of the application.
 
 ## Development
 
