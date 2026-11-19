@@ -23,9 +23,9 @@ from enum import Enum
 import numpy as np
 
 try:
-    from PyQt6.QtWidgets import QApplication, QDoubleSpinBox, QLabel, QLineEdit, QMessageBox
+    from PyQt6.QtWidgets import QApplication, QDoubleSpinBox, QFileDialog, QLabel, QLineEdit, QMessageBox
 except ImportError:
-    from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QLabel, QLineEdit, QMessageBox
+    from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QFileDialog, QLabel, QLineEdit, QMessageBox
 
 from SysID_GUI import (
     MainWindow as CorrectorSysIDWindow,
@@ -277,6 +277,12 @@ class MainWindow(CorrectorSysIDWindow):
         self.load_correctors_button.setText("Load actuators")
         self.clear_correctors_button.setText("Clear actuators")
         self.pattern_corrs_input.setPlaceholderText("e.g. ZH*, ZV*, QM1*FF, QD*FF")
+        # Own save/load: an exception in a Qt slot aborts the whole application (PyQt6), and the
+        # selection may be split between correctors.txt and quadrupole_movers.txt.
+        for button, slot in ((self.save_correctors_button, self._save_actuators_clicked),
+                             (self.load_correctors_button, self._load_actuators_clicked)):
+            button.clicked.disconnect()
+            button.clicked.connect(slot)
 
     def WORKER_CLASS(self, *args, **kwargs):  # called by MainWindow._launch_worker like a class
         initial_x, initial_y, range_x, range_y = self._mover_settings
@@ -349,6 +355,68 @@ class MainWindow(CorrectorSysIDWindow):
 
     def _actuator_selection_filename(self):
         return "actuators.txt"
+
+    # --- saving and loading the selection ------------------------------------------------
+    SPLIT_SELECTION_FILES = ("correctors.txt", "quadrupole_movers.txt")
+
+    def _selection_folder(self):
+        folder = os.path.expanduser(os.path.expandvars(self.working_directory_input.text().strip()))
+        return folder if os.path.isdir(folder) else os.path.expanduser("~/CERN-Flight_Simulator-Data")
+
+    @staticmethod
+    def _read_names(path):
+        with open(path) as file:
+            return [line.strip() for line in file if line.strip()]
+
+    def _save_actuators_clicked(self):
+        try:
+            names = [item.text() for item in self.correctors_list.selectedItems()] or self._available_actuators()
+            names = self._sort_actuators(names)
+            start = os.path.join(self._selection_folder(), self._actuator_selection_filename())
+            filename, _ = QFileDialog.getSaveFileName(self, "Save actuators", start, "Text (*.txt)")
+            if not filename:
+                return
+            os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
+            with open(filename, "w") as file:
+                file.writelines(f"{name}\n" for name in names)
+            movers = sum(name in self.mover_names for name in names)
+            QMessageBox.information(self, "Save actuators",
+                                    f"Saved {len(names) - movers} correctors and {movers} quadrupole movers to\n{filename}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save actuators", f"Could not save the selection:\n{exc}\n\n"
+                                 "Choose a folder you can write to (e.g. under ~/CERN-Flight_Simulator-Data).")
+
+    def _load_actuators_clicked(self):
+        try:
+            start = os.path.join(self._selection_folder(), self._actuator_selection_filename())
+            filename, _ = QFileDialog.getOpenFileName(self, "Load actuators", start, "Text (*.txt)")
+            if not filename:
+                return
+            names = self._read_names(filename)
+            folder = os.path.dirname(filename)
+            if os.path.basename(filename) in self.SPLIT_SELECTION_FILES:
+                # correctors.txt and quadrupole_movers.txt of one SysID folder are loaded together
+                for other in self.SPLIT_SELECTION_FILES:
+                    path = os.path.join(folder, other)
+                    if other != os.path.basename(filename) and os.path.isfile(path):
+                        names += self._read_names(path)
+            names = list(dict.fromkeys(names))
+            items = {self.correctors_list.item(i).text(): self.correctors_list.item(i) for i in range(self.correctors_list.count())}
+            found = [name for name in names if name in items]
+            missing = [name for name in names if name not in items]
+            if not found:
+                QMessageBox.warning(self, "Load actuators", f"No actuator of this window is listed in\n{filename}")
+                return
+            self.correctors_list.clearSelection()
+            for name in found:
+                items[name].setSelected(True)
+            movers = sum(name in self.mover_names for name in found)
+            message = f"Selected {len(found) - movers} correctors and {movers} quadrupole movers."
+            if missing:
+                message += f"\n\nNot available here (ignored): {', '.join(missing)}"
+            QMessageBox.information(self, "Load actuators", message)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load actuators", f"Could not load the selection:\n{exc}")
 
     def _actuator_label(self):
         return "Actuator"
