@@ -15,6 +15,7 @@ measured again in later iterations, so a stopped run resumes like the corrector 
 """
 
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -49,11 +50,71 @@ USABLE_MOVERS = {"ATF2_Ext": ATF2_EXT_MOVERS, "ATF2_Ext_RFT": ATF2_EXT_MOVERS}
 
 DEFAULT_MOVER_STEP_UM = 100.0
 DEFAULT_MOVER_RANGE_UM = 1000.0
+MOVER_TOLERANCE_UM = 15.0  # same tolerance as apply_qmag_xyroll in the ATF2 interfaces
 
 
 class CombinedMode(Enum):
     """Takes the place of ActuatorMode in folder names and saved settings."""
     KickerQM = "Correctors and quadrupole movers"
+
+
+def read_selection_file(path):
+    """Names in a selection file: one or more per line, separated by commas/spaces; '#' starts a comment."""
+    names = []
+    with open(path) as file:
+        for line in file:
+            names += [token for token in re.split(r"[,;\s]+", line.split("#", 1)[0]) if token]
+    return names
+
+
+def match_selection(requested, offered, movers, quadrupoles=()):
+    """Match names from a selection file to the actuators offered in the list.
+
+    Accepted spellings for a mover: QM15FF, qm15ff, QM15FF:x, QM15FF_y, and MQM15FF (the BPM on it).
+    Returns (found, ignored): found in the order requested, ignored as {name: reason}.
+    """
+    offered = [str(name) for name in offered]
+    by_key = {name.upper(): name for name in offered}
+    mover_keys = {str(name).upper() for name in movers}
+    quad_keys = {str(name).upper() for name in quadrupoles}
+    found, ignored = [], {}
+    for raw in requested:
+        key = str(raw).strip().upper()
+        candidates = [key]
+        plane = re.match(r"^(.+?)[:_]([XY])$", key)
+        if plane:
+            candidates.append(plane.group(1))
+        candidates += [candidate[1:] for candidate in list(candidates) if candidate.startswith("M")]
+        match = next((by_key[c] for c in candidates if c in by_key and (c == key or c in mover_keys)), None)
+        if match is not None:
+            if match not in found:
+                found.append(match)
+        elif any(c in quad_keys for c in candidates):
+            ignored[raw] = "quadrupole without a usable mover in this interface"
+        else:
+            ignored[raw] = "not in this window's list"
+    return found, ignored
+
+
+def _ignored_text(ignored):
+    if not ignored:
+        return ""
+    return "Not selected:\n" + "\n".join(f"  {name}: {reason}" for name, reason in ignored.items())
+
+
+def selection_report(filename, found, ignored, movers):
+    """Text shown (and printed) after loading a selection file."""
+    mover_set = set(movers)
+    correctors = [name for name in found if name not in mover_set]
+    chosen_movers = [name for name in found if name in mover_set]
+    lines = [f"Loaded {os.path.basename(filename)}:",
+             f"  correctors ({len(correctors)}): {', '.join(correctors) or 'none'}",
+             f"  quadrupole movers ({len(chosen_movers)}): {', '.join(chosen_movers) or 'none'}"]
+    if ignored:
+        lines.append(_ignored_text(ignored))
+        if any("mover" in reason for reason in ignored.values()) and movers:
+            lines.append(f"  Movers offered here: {', '.join(movers)}")
+    return "\n".join(lines)
 
 
 def usable_movers(interface):
@@ -71,8 +132,10 @@ class CombinedWorker(QMWorker):
     """Run the corrector and quadrupole-mover excitations of one SysID in beamline order."""
 
     def __init__(self, *args, movers=(), mover_initial_um=(DEFAULT_MOVER_STEP_UM, DEFAULT_MOVER_STEP_UM),
-                 mover_max_range_um=(DEFAULT_MOVER_RANGE_UM, DEFAULT_MOVER_RANGE_UM), **kwargs):
+                 mover_max_range_um=(DEFAULT_MOVER_RANGE_UM, DEFAULT_MOVER_RANGE_UM), corrector_unit="", bpm_unit="mm", **kwargs):
         super().__init__(*args, **kwargs)
+        self.corrector_unit = corrector_unit
+        self.bpm_unit = bpm_unit
         self.actuator_mode = CombinedMode.KickerQM
         self.movers = set(movers)
         self.mover_max_x, self.mover_max_y = (float(value) for value in mover_max_range_um)
@@ -119,6 +182,24 @@ class CombinedWorker(QMWorker):
         while self.running and time.monotonic() - start < seconds:
             time.sleep(0.05)
 
+    def _mover_readback(self, magnet, axis):
+        """Mover position after a move [um]: encoder (xact/yact) if the interface has one, else the setpoint."""
+        try:
+            q = self.interface.get_quadrupoles([magnet])
+        except Exception as exc:
+            print(f"  {magnet}: could not read the mover back ({exc})")
+            return None
+        names = [str(name) for name in q.get("names", [])]
+        if magnet not in names:
+            return None
+        index = names.index(magnet)
+        for key in (f"{axis}act", f"{axis}des"):
+            if key in q:
+                value = float(np.asarray(q[key], dtype=float).ravel()[index])
+                if np.isfinite(value):
+                    return value
+        return None
+
     # --- main loop ---------------------------------------------------------------------
     def _run_impl(self):
         self.running = True
@@ -131,6 +212,11 @@ class CombinedWorker(QMWorker):
             for axis in (("x", "y") if name in self.movers else (None,))
         )
         self._total_steps = max(pending, 1)
+        movers = [name for name in self.correctors if name in self.movers]
+        correctors = [name for name in self.correctors if name not in self.movers]
+        print(f"SysID correctors + movers: {len(correctors)} correctors [{self.corrector_unit}] "
+              f"({', '.join(correctors) or 'none'}), {len(movers)} quadrupole movers [um] ({', '.join(movers) or 'none'}), "
+              f"{self.Niter} iteration(s), {pending} excitation(s) to measure")
 
         for iteration in range(self.Niter):
             if not self._checkpoint():
@@ -161,7 +247,7 @@ class CombinedWorker(QMWorker):
         def set_corrector(current):
             return interface.set_correctors(corrector, current) is not False
 
-        initial = float(np.asarray(interface.get_correctors(corrector)["bdes"], dtype=float).ravel()[0])
+        initial = float(np.asarray(interface.get_correctors(corrector)["bdes"], dtype=float).ravel()[0]) + 0.0  # no "-0" in the log
         changed = measured = skipped = False
         states = {}
         for sign in "+-":
@@ -171,8 +257,10 @@ class CombinedWorker(QMWorker):
                 continue
             if not self._checkpoint():
                 break
-            print(f"Corrector {corrector} '{sign}' excitation...")
-            if not set_corrector(clamp(initial + (kick if sign == "+" else -kick))):
+            value = clamp(initial + (kick if sign == "+" else -kick))
+            print(f"Corrector {corrector} '{sign}' excitation: {initial:+.5g} -> {value:+.5g} {self.corrector_unit} "
+                  f"(step {value - initial:+.5g} {self.corrector_unit})")
+            if not set_corrector(value):
                 print(f"Skipping {corrector}: '{sign}' readback failed after retries")
                 skipped = True
                 break
@@ -193,6 +281,8 @@ class CombinedWorker(QMWorker):
             self._report(diff_x, err_x, diff_y, err_y, corrector)
         observed = finite_abs_max(diff_x if plane == "x" else diff_y)
         new_kick = 0.8 * update_amplitude(kick, observed, target, max_current) + 0.2 * kick
+        print(f"  {corrector}: max|orbit change| in {plane} = {observed:.4g} {self.bpm_unit} for +/-{kick:.5g} {self.corrector_unit}; "
+              f"next excitation {new_kick:.5g} {self.corrector_unit}")
         if plane == "x":
             self.hkicks[index] = new_kick
         else:
@@ -228,13 +318,20 @@ class CombinedWorker(QMWorker):
                         continue
                     if not self._checkpoint():
                         break
-                    print(f"Quadrupole mover {magnet} {axis} '{sign}' excitation...")
                     displacement = amplitude if sign == "+" else -amplitude
+                    start = x0 if axis == "x" else y0
+                    print(f"Quadrupole mover {magnet} {axis} '{sign}' excitation: {axis} {start:+.1f} -> {start + displacement:+.1f} um "
+                          f"(step {displacement:+.1f} um)")
                     moved = True
                     if axis == "x":
                         interface.apply_qmag_xyroll(magnet, x0 + displacement, y0, roll0)
                     else:
                         interface.apply_qmag_xyroll(magnet, x0, y0 + displacement, roll0)
+                    readback = self._mover_readback(magnet, axis)
+                    if readback is not None:
+                        off = readback - (start + displacement)
+                        print(f"  {magnet} {axis} readback {readback:+.1f} um" + (
+                            f"  WARNING: {off:+.1f} um from the request" if abs(off) > MOVER_TOLERANCE_UM else ""))
                     state = interface.get_state()
                     state.save(filename=filename)
                     states[sign] = state
@@ -252,7 +349,10 @@ class CombinedWorker(QMWorker):
             if measured:
                 self._report(diff_x, err_x, diff_y, err_y, f"{magnet}:{axis}")
             observed = max(finite_abs_max(diff_x), finite_abs_max(diff_y))
+            used = amplitude
             amplitude = 0.8 * update_amplitude(amplitude, observed, target, max_range) + 0.2 * amplitude
+            print(f"  {magnet}:{axis}: max|orbit change| x = {finite_abs_max(diff_x):.4g}, y = {finite_abs_max(diff_y):.4g} {self.bpm_unit} "
+                  f"for +/-{used:.1f} um; next excitation {amplitude:.1f} um")
             if axis == "x":
                 self.hkicks[index] = amplitude
             else:
@@ -287,7 +387,8 @@ class MainWindow(CorrectorSysIDWindow):
     def WORKER_CLASS(self, *args, **kwargs):  # called by MainWindow._launch_worker like a class
         initial_x, initial_y, range_x, range_y = self._mover_settings
         return CombinedWorker(*args, movers=self.mover_names, mover_initial_um=(initial_x, initial_y),
-                              mover_max_range_um=(range_x, range_y), **kwargs)
+                              mover_max_range_um=(range_x, range_y), corrector_unit=self.corrs_unit,
+                              bpm_unit=self.bpm_unit, **kwargs)
 
     def _window_title_prefix(self):
         return "SYSID Correctors + QM"
@@ -392,29 +493,32 @@ class MainWindow(CorrectorSysIDWindow):
             filename, _ = QFileDialog.getOpenFileName(self, "Load actuators", start, "Text (*.txt)")
             if not filename:
                 return
-            names = self._read_names(filename)
+            names = read_selection_file(filename)
             folder = os.path.dirname(filename)
             if os.path.basename(filename) in self.SPLIT_SELECTION_FILES:
                 # correctors.txt and quadrupole_movers.txt of one SysID folder are loaded together
                 for other in self.SPLIT_SELECTION_FILES:
                     path = os.path.join(folder, other)
                     if other != os.path.basename(filename) and os.path.isfile(path):
-                        names += self._read_names(path)
+                        names += read_selection_file(path)
             names = list(dict.fromkeys(names))
             items = {self.correctors_list.item(i).text(): self.correctors_list.item(i) for i in range(self.correctors_list.count())}
-            found = [name for name in names if name in items]
-            missing = [name for name in names if name not in items]
+            quadrupoles = getattr(self.interface, "quadrupoles", None) or getattr(self.interface, "Qmagnames", None) or []
+            found, ignored = match_selection(names, items, self.mover_names, quadrupoles)
+            print(selection_report(filename, found, ignored, self.mover_names))
             if not found:
-                QMessageBox.warning(self, "Load actuators", f"No actuator of this window is listed in\n{filename}")
+                QMessageBox.warning(self, "Load actuators", f"No actuator of this window is listed in\n{filename}\n\n"
+                                    + _ignored_text(ignored))
                 return
+            if self.pattern_corrs_input.text().strip():
+                # A pattern would re-select the list the next time it is applied
+                self.pattern_corrs_input.blockSignals(True)
+                self.pattern_corrs_input.clear()
+                self.pattern_corrs_input.blockSignals(False)
             self.correctors_list.clearSelection()
             for name in found:
                 items[name].setSelected(True)
-            movers = sum(name in self.mover_names for name in found)
-            message = f"Selected {len(found) - movers} correctors and {movers} quadrupole movers."
-            if missing:
-                message += f"\n\nNot available here (ignored): {', '.join(missing)}"
-            QMessageBox.information(self, "Load actuators", message)
+            QMessageBox.information(self, "Load actuators", selection_report(filename, found, ignored, self.mover_names))
         except Exception as exc:
             QMessageBox.critical(self, "Load actuators", f"Could not load the selection:\n{exc}")
 

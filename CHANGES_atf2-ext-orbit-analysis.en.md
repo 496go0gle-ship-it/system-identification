@@ -36,3 +36,8 @@ For `ATF2_Ext` and `ATF2_Ext_RFT` only the 22 final-focus quadrupoles are offere
 - From that folder: corrector response matrix (`ZH1X`, `ZV1X`) and quadrupole-mover response matrix (`QM15FF`, `QD0FF`, x and y) are both computed.
 - The window opens with 51 actuators (29 correctors + 22 movers) and writes the three selection files.
 - Not checked on the real machine or by pressing START in the window.
+
+## Selection files and logs (added)
+- **Selection files:** "Load actuators" reads names separated by newlines, spaces or commas, with `#` comments. A mover may be written `QM15FF`, `qm15ff`, `QM15FF:x` or `MQM15FF` (the BPM on the quadrupole). After loading, the selected correctors and movers and the names not selected (quadrupole without a mover, or not in the list) are shown and printed. A leftover name pattern, which would override the selection, is cleared. Same rules as the combined BBA.
+- **Terminal log:** a header with the correctors and movers and their units; each excitation prints "start -> excited value (step)", correctors in their strength unit (A on the machine), movers in um; movers also print the position read back after the move (`WARNING` beyond 15 um); after each actuator, the largest orbit change and the next amplitude.
+- Checked (RF-Track): 6 correctors + 5 movers measured; the mover x/y DATA files are written and the log above is printed.
