@@ -44,8 +44,7 @@
           </property>
           <property name="styleSheet">
            <string notr="true">QGroupBox#devicesGroup {
-    background-color: rgb(245, 245, 245);
-    border: 1px solid rgb(210, 210, 210);
+    border: 1px solid palette(mid);
     border-radius: 6px;
     margin-top: 8px;
     padding-top: 6px;
@@ -85,8 +84,7 @@ QGroupBox#devicesGroup::title {
              </property>
              <property name="styleSheet">
               <string notr="true">QGroupBox#correctorsGroup {
-    background-color: rgb(245, 245, 245);
-    border: 1px solid rgb(210, 210, 210);
+    border: 1px solid palette(mid);
     border-radius: 6px;
     margin-top: 8px;
     padding-top: 6px;
@@ -181,8 +179,7 @@ QGroupBox#correctorsGroup::title {
              </property>
              <property name="styleSheet">
               <string notr="true">QGroupBox#bpmsGroup {
-    background-color: rgb(245, 245, 245);
-    border: 1px solid rgb(210, 210, 210);
+    border: 1px solid palette(mid);
     border-radius: 6px;
     margin-top: 8px;
     padding-top: 6px;
@@ -305,8 +302,7 @@ QGroupBox#bpmsGroup::title {
                 </property>
                 <property name="styleSheet">
                  <string notr="true">QGroupBox#dataStorageGroup {
-    background-color: rgb(245, 245, 245);
-    border: 1px solid rgb(210, 210, 210);
+    border: 1px solid palette(mid);
     border-radius: 6px;
     margin-top: 0px;
     padding-top: 6px;
@@ -376,8 +372,7 @@ QGroupBox#dataStorageGroup::title {
                 </property>
                 <property name="styleSheet">
                  <string notr="true">QGroupBox {
-    background-color: rgb(245, 245, 245);
-    border: 1px solid rgb(210, 210, 210);
+    border: 1px solid palette(mid);
     border-radius: 6px;
     margin-top: 8px;
     padding-top: 6px;
@@ -769,7 +764,7 @@ QGroupBox::title {
     font-weight: bold;
 }
 QToolButton#nsamples_tooltip:hover {
-    background-color: #e6e6e6;
+    background-color: rgba(128, 128, 128, 60);
 }</string>
                    </property>
                    <property name="text">
@@ -856,7 +851,7 @@ QToolButton#nsamples_tooltip:hover {
       font-weight: bold;
   }
   QToolButton#energy_change_tooltip:hover {
-      background-color: #e6e6e6;
+      background-color: rgba(128, 128, 128, 60);
   }</string>
                           </property>
                           <property name="text"><string>?</string></property>
@@ -966,7 +961,7 @@ QToolButton#nsamples_tooltip:hover {
     font-weight: bold;
 }
 QToolButton#intensity_change_tooltip:hover {
-    background-color: #e6e6e6;
+    background-color: rgba(128, 128, 128, 60);
 }</string>
                         </property>
                         <property name="text"><string>?</string></property>
