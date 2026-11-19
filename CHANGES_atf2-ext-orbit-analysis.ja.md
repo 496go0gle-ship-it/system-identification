@@ -1,0 +1,38 @@
+# ブランチ `atf2-ext-orbit-analysis` の変更内容（system-identification）
+
+ベース：`flight-simulator-framework/system-identification` の `master`（`3e7f4ab`）
+英語版：[CHANGES_atf2-ext-orbit-analysis.en.md](CHANGES_atf2-ext-orbit-analysis.en.md)
+
+新しいファイル：`SysID_corrector_and_mover_GUI.py`。`SysID_GUI.py` と `SysID_QM_GUI.py` は変更していません。
+
+## 何をするか
+1回の SysID で、補正電磁石と四極ムーバーをまとめて振ります。順番は一覧の順（補正電磁石が先、そのあとムーバーをビームラインの順）です。それぞれの測定方法は、既存のアプリと同じです。
+
+| アクチュエータ | 測定方法（元のアプリ） | データファイル |
+|---|---|---|
+| 補正電磁石 | 今の設定値を中心に ± に振り、振り幅を自動調整（`SysID_GUI.py`） | `DATA_<補正電磁石>_<p\|m><回>.pkl` |
+| 四極ムーバー | x 方向に ±、続けて y 方向に ± に動かし、方向ごとに元の位置へ戻す（`SysID_QM_GUI.py`） | `DATA_<四極>_<x\|y>_<p\|m><回>.pkl` |
+
+すべて1つのフォルダに保存するので、同じフォルダに `ComputeResponseMatrix_GUI.py`（補正電磁石）と `ComputeResponseMatrix_QM_GUI.py`（四極ムーバー）の両方を使えます。選んだ機器は、`actuators.txt`（再開用）、`correctors.txt`、`quadrupole_movers.txt` に保存します。
+
+## 画面
+- 補正電磁石と使えるムーバーを、1つの一覧にまとめて表示します。名前のパターン入力も両方に使えます（例：`ZH*, QM1*FF`）。
+- 補正電磁石の設定：既存の欄（最初の振り幅、最大の強さ）をそのまま使います。
+- ムーバーの設定：新しい欄 **Mover initial X/Y [um]**（既定 100）と **Max mover range X/Y [um]**（既定 1000）を追加しました。既定値は SysID QM と同じです。
+- 目標の軌道の振れ幅、繰り返し回数、BPM のサンプル数、測定モード（軌道・エネルギー・強度）は両方に共通です。
+
+## 使えるムーバー
+`ATF2_Ext` と `ATF2_Ext_RFT` では、最終収束系の四極22台だけを表示します：`QM16FF`、`QM15FF`、`QM14FF`、`QM13FF`、`QM12FF`、`QM11FF`、`QD10BFF`、`QD10AFF`、`QF9BFF`、`QF9AFF`、`QD8FF`、`QF7FF`、`QD6FF`、`QF5BFF`、`QF5AFF`、`QD4BFF`、`QD4AFF`、`QF3FF`、`QD2BFF`、`QD2AFF`、`QF1FF`、`QD0FF`。
+- 2026-11-19 の実機データでムーバー位置が読めた四極です。取り出しラインの四極 `QF1X`〜`QF21X` にはムーバーがありません（SysID QM では一覧に出てしまいます）。
+- 研究セットアップ（`orbit_correction_setup_1101`）では、このうち21台を使っています。最後の補正電磁石 `ZH1FF`・`ZV1FF` より上流にある `QM16FF` だけを除いたものです。
+- それ以外のインターフェースでは、`get_quadrupole_movers_names()` が返すムーバーをすべて表示します。
+
+## SysID と SysID QM を別々に使う場合との違い
+- **再開：** ムーバーも、データファイルがすでにある測定は、どの回でも測り直しません。SysID QM は、2回目以降の回では測り直します。
+- **プロットの位置の印：** ATF2 Ext の並びには BPM 名が入っているので、ムーバーの位置は同じ四極にある BPM（`QM15FF` → `MQM15FF`）で表示します。
+
+## 確認結果（RF-Track シミュレーション、`ATF2_Ext_RFT`）
+- `ZH1X`、`ZV1X`、`QM15FF`、`QD0FF` を1回振った結果：データファイル12個、プロット6回（`ZH1X`、`ZV1X`、`QM15FF:x`、`QM15FF:y`、`QD0FF:x`、`QD0FF:y`）。補正電磁石もムーバーも元の値に戻り、もう一度実行しても何も測り直しませんでした。
+- そのフォルダから、補正電磁石の応答行列（`ZH1X`、`ZV1X`）と四極ムーバーの応答行列（`QM15FF`、`QD0FF`、x と y）の両方を計算できました。
+- 画面は51項目（補正電磁石29台＋ムーバー22台）で開き、3つの選択ファイルを書き分けました。
+- 実機での動作と、画面の START ボタンからの実行は確認していません。
