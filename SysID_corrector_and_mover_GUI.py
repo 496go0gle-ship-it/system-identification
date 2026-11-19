@@ -183,22 +183,43 @@ class CombinedWorker(QMWorker):
             time.sleep(0.05)
 
     def _mover_readback(self, magnet, axis):
-        """Mover position after a move [um]: encoder (xact/yact) if the interface has one, else the setpoint."""
+        """(setpoint, encoder) of one mover plane [um]; NaN where the interface has no such value."""
         try:
             q = self.interface.get_quadrupoles([magnet])
         except Exception as exc:
             print(f"  {magnet}: could not read the mover back ({exc})")
-            return None
+            return np.nan, np.nan
         names = [str(name) for name in q.get("names", [])]
         if magnet not in names:
-            return None
+            return np.nan, np.nan
         index = names.index(magnet)
-        for key in (f"{axis}act", f"{axis}des"):
-            if key in q:
-                value = float(np.asarray(q[key], dtype=float).ravel()[index])
-                if np.isfinite(value):
-                    return value
-        return None
+        values = []
+        for key in (f"{axis}des", f"{axis}act"):
+            arr = np.asarray(q.get(key, []), dtype=float).ravel()
+            values.append(float(arr[index]) if arr.size > index else np.nan)
+        return tuple(values)
+
+    def _report_move(self, magnet, axis, before, after, target):
+        """Print the setpoint and the encoder change after a move, and warn if the mover is not where requested.
+
+        The encoder is compared by the amount it moved, whatever its sign: on ATF2 the x encoders of
+        QF1FF and QD0FF count opposite to the setpoint.
+        """
+        setpoint, encoder = after
+        text = f"  {magnet} {axis}: setpoint read back {setpoint:+.1f} um"
+        problems = []
+        if np.isfinite(setpoint) and abs(setpoint - target) > MOVER_TOLERANCE_UM:
+            problems.append(f"setpoint {setpoint - target:+.1f} um from the request")
+        requested = target - before[0] if np.isfinite(before[0]) else np.nan
+        moved = encoder - before[1]
+        if np.isfinite(moved):
+            text += f", encoder moved {moved:+.1f} um"
+            if np.isfinite(requested) and abs(abs(moved) - abs(requested)) > MOVER_TOLERANCE_UM:
+                problems.append(f"encoder moved {abs(moved):.1f} um instead of {abs(requested):.1f} um")
+            if (np.isfinite(requested) and min(abs(requested), abs(moved)) > MOVER_TOLERANCE_UM
+                    and np.sign(moved) != np.sign(requested)):
+                text += " (encoder counts opposite to the setpoint)"
+        print(text + ("  WARNING: " + "; ".join(problems) if problems else ""))
 
     # --- main loop ---------------------------------------------------------------------
     def _run_impl(self):
@@ -322,16 +343,13 @@ class CombinedWorker(QMWorker):
                     start = x0 if axis == "x" else y0
                     print(f"Quadrupole mover {magnet} {axis} '{sign}' excitation: {axis} {start:+.1f} -> {start + displacement:+.1f} um "
                           f"(step {displacement:+.1f} um)")
+                    before = self._mover_readback(magnet, axis)
                     moved = True
                     if axis == "x":
                         interface.apply_qmag_xyroll(magnet, x0 + displacement, y0, roll0)
                     else:
                         interface.apply_qmag_xyroll(magnet, x0, y0 + displacement, roll0)
-                    readback = self._mover_readback(magnet, axis)
-                    if readback is not None:
-                        off = readback - (start + displacement)
-                        print(f"  {magnet} {axis} readback {readback:+.1f} um" + (
-                            f"  WARNING: {off:+.1f} um from the request" if abs(off) > MOVER_TOLERANCE_UM else ""))
+                    self._report_move(magnet, axis, before, self._mover_readback(magnet, axis), start + displacement)
                     state = interface.get_state()
                     state.save(filename=filename)
                     states[sign] = state
