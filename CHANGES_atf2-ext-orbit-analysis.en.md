@@ -44,3 +44,31 @@ For `ATF2_Ext` and `ATF2_Ext_RFT` only the 22 final-focus quadrupoles are offere
 
 ## Mover read-back check (added)
 - After each move, the setpoint read back and the encoder change are printed. A `WARNING` is printed when the setpoint is more than 15 um from the request, or the encoder moved by an amount more than 15 um different from the request. The encoder is compared by magnitude; a reversed one is reported as "encoder counts opposite to the setpoint" (on the machine: `QF1FF` and `QD0FF` in x).
+
+## Settings, progress and log record, and restoring settings (added)
+- **Why:** in the machine SysID of 2026-11-19, many correctors' ±0.01 A excitations were buried in BPM noise, and the ZH7X column was spoiled by an orbit jump during its measurement. Afterwards there was no way to tell which settings were used and how well each excitation worked. The record is the same idea as the combined BBA's.
+- **Change** (new file `system_identification/run_record.py`):
+  - `sysid_settings.json` in the data folder, written when START is pressed.
+    - `settings`: every option of the window:
+      - interface, folder, measuring mode
+      - actuators, BPMs
+      - initial kicks, target orbit excursion, max current
+      - mover initial step and range, Niter, BPM samples, units
+      - code commits (or git's reason when it cannot tell)
+    - `runs`: one entry per START or resume, appended, never overwritten.
+      - start and end time, pairs measured
+      - how the run ended: finished, stopped (STOP, or a corrector did not return), error (with the reason)
+      - still `running` means the program did not reach the end
+    - `excitations`: one per measured ± pair, with the kick, the largest orbit change and its BPM, its signal/noise, and the next kick.
+  - Each pair prints its `signal/noise`, with a WARNING below 3 ("this response is unreliable; increase the excitation or BPM samples"). The noise is √(σ₊² + σ₋²) / (2√shots) from the shot spread of the two states.
+  - Every line printed during the run is appended, with the time, to `sysid_log.txt` (mode change and restore included).
+  - Choosing a folder holding `sysid_settings.json` with the folder "…" button puts the last run's settings back in the window. It also shows how that run ended and which excitations were buried in noise.
+  - A failure to write the record never stops the measurement (a warning is printed).
+- **Checked (RF-Track, `ATF2_Ext_RFT`, 2 correctors and 2 movers):**
+  - A finished run gave `finished` with 6 pairs and a 50-line log.
+  - STOP after the first pair gave `stopped` (STOP pressed).
+  - `set_correctors` raising during the measurement gave `error` with the reason.
+  - A resume in the same folder with Niter 2 gave a second `runs` entry (resumed), skipped iteration 0 and measured the 6 pairs of iteration 1.
+  - Restoring into a new window brought back the settings and selection.
+  - Not yet checked on the machine.
+- Noticed, unchanged: `SysID_GUI.py` divides its error bars by the square root of the number of BPMs instead of the number of shots (`nsamples = stdx.size`). This affects the plotted error bars only; the record's signal/noise uses the shot count.

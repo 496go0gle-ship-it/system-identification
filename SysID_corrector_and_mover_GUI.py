@@ -35,6 +35,8 @@ from SysID_GUI import (
     update_amplitude,
 )
 from SysID_QM_GUI import QMWorker
+from system_identification.run_record import (SysIDRecord, code_versions, excitation_entry, install_log,
+                                              read_record, remove_log)
 
 # Quadrupoles of the ATF2 extraction line whose movers can be driven: the final-focus
 # quadrupoles. Their mover read-backs (x, y, roll) are present in the machine data of
@@ -51,6 +53,7 @@ USABLE_MOVERS = {"ATF2_Ext": ATF2_EXT_MOVERS, "ATF2_Ext_RFT": ATF2_EXT_MOVERS}
 DEFAULT_MOVER_STEP_UM = 100.0
 DEFAULT_MOVER_RANGE_UM = 1000.0
 MOVER_TOLERANCE_UM = 15.0  # same tolerance as apply_qmag_xyroll in the ATF2 interfaces
+LOW_SNR = 3.0  # an excitation whose orbit change is below this many times the BPM noise is flagged
 
 
 class CombinedMode(Enum):
@@ -132,8 +135,12 @@ class CombinedWorker(QMWorker):
     """Run the corrector and quadrupole-mover excitations of one SysID in beamline order."""
 
     def __init__(self, *args, movers=(), mover_initial_um=(DEFAULT_MOVER_STEP_UM, DEFAULT_MOVER_STEP_UM),
-                 mover_max_range_um=(DEFAULT_MOVER_RANGE_UM, DEFAULT_MOVER_RANGE_UM), corrector_unit="", bpm_unit="mm", **kwargs):
+                 mover_max_range_um=(DEFAULT_MOVER_RANGE_UM, DEFAULT_MOVER_RANGE_UM), corrector_unit="", bpm_unit="mm",
+                 record=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.record = record
+        self._stop_requested = False
+        self._abort_reason = ""
         self.corrector_unit = corrector_unit
         self.bpm_unit = bpm_unit
         self.actuator_mode = CombinedMode.KickerQM
@@ -144,6 +151,49 @@ class CombinedWorker(QMWorker):
         for index, name in enumerate(self.correctors):
             if name in self.movers:
                 self.hkicks[index], self.vkicks[index] = (float(value) for value in mover_initial_um)
+
+    # --- run, stop and the record --------------------------------------------------------
+    def run(self):
+        # As Worker.run, and the record gets how the run ended.
+        status, reason = "finished", ""
+        try:
+            self._run_impl()
+            if self._stop_requested:
+                status, reason = "stopped", "STOP pressed"
+            elif self._abort_reason:
+                status, reason = "stopped", self._abort_reason
+        except Exception as exc:
+            self.running = False
+            status, reason = "error", str(exc)
+            print(f"SysID error: {exc}")
+            self.error.emit(str(exc))
+        finally:
+            if self.record is not None:
+                self.record.end(status, reason)
+            self.finished.emit()
+
+    def stop(self):
+        self._stop_requested = True
+        super().stop()
+
+    def _record_pair(self, name, axis, iteration, half_kick, unit, plus, minus, planes, next_kick):
+        """Add the measured +/- pair to the record and flag an orbit change that is close to the BPM noise."""
+        try:
+            entry = excitation_entry(name, axis, iteration, half_kick, unit, plus, minus, self.bpms, planes,
+                                     getattr(self.interface, "nsamples", 1), next_kick)
+        except Exception as exc:
+            print(f"  WARNING: could not evaluate {name} for the record ({exc})")
+            return
+        if self.record is not None:
+            self.record.add_excitation(entry)
+        snr = entry["best_snr"]["snr"]
+        label = name if axis is None else f"{name}:{axis}"
+        text = (f"  {label}: signal/noise {snr:.1f} at {entry['best_snr']['at_bpm']} ({entry['best_snr']['plane']}), "
+                f"{entry['shots']} shot(s)")
+        if snr < LOW_SNR:
+            text += (f"  WARNING: the orbit change is close to the BPM noise; this response is unreliable "
+                     f"(increase the excitation or BPM samples)")
+        print(text)
 
     # --- bookkeeping -------------------------------------------------------------------
     def _checkpoint(self):
@@ -293,6 +343,7 @@ class CombinedWorker(QMWorker):
 
         if (changed or skipped) and not set_corrector(initial):
             print(f"Stopping SysID: {corrector} did not return to its initial current")
+            self._abort_reason = f"{corrector} did not return to its initial current"
             self.running = False
         if skipped or len(states) < 2:
             return
@@ -304,6 +355,8 @@ class CombinedWorker(QMWorker):
         new_kick = 0.8 * update_amplitude(kick, observed, target, max_current) + 0.2 * kick
         print(f"  {corrector}: max|orbit change| in {plane} = {observed:.4g} {self.bpm_unit} for +/-{kick:.5g} {self.corrector_unit}; "
               f"next excitation {new_kick:.5g} {self.corrector_unit}")
+        if measured:
+            self._record_pair(corrector, None, iteration, kick, self.corrector_unit, states["+"], states["-"], (plane,), new_kick)
         if plane == "x":
             self.hkicks[index] = new_kick
         else:
@@ -371,6 +424,8 @@ class CombinedWorker(QMWorker):
             amplitude = 0.8 * update_amplitude(amplitude, observed, target, max_range) + 0.2 * amplitude
             print(f"  {magnet}:{axis}: max|orbit change| x = {finite_abs_max(diff_x):.4g}, y = {finite_abs_max(diff_y):.4g} {self.bpm_unit} "
                   f"for +/-{used:.1f} um; next excitation {amplitude:.1f} um")
+            if measured:
+                self._record_pair(magnet, axis, iteration, used, "um", states["+"], states["-"], ("x", "y"), amplitude)
             if axis == "x":
                 self.hkicks[index] = amplitude
             else:
@@ -404,9 +459,134 @@ class MainWindow(CorrectorSysIDWindow):
 
     def WORKER_CLASS(self, *args, **kwargs):  # called by MainWindow._launch_worker like a class
         initial_x, initial_y, range_x, range_y = self._mover_settings
+        record = self._begin_record(correctors=list(args[2]), bpms=list(args[3]), niter=args[10], folder=args[11])
         return CombinedWorker(*args, movers=self.mover_names, mover_initial_um=(initial_x, initial_y),
                               mover_max_range_um=(range_x, range_y), corrector_unit=self.corrs_unit,
-                              bpm_unit=self.bpm_unit, **kwargs)
+                              bpm_unit=self.bpm_unit, record=record, **kwargs)
+
+    # --- the record of each run (sysid_settings.json, sysid_log.txt) ---------------------
+    def _settings_snapshot(self, correctors, bpms, niter, folder):
+        def text(name):
+            widget = getattr(self, name, None)
+            return widget.text() if widget is not None else None
+
+        def value(name):
+            widget = getattr(self, name, None)
+            return widget.value() if widget is not None else None
+
+        initial_x, initial_y, range_x, range_y = self._mover_settings
+        method = getattr(self, "beam_change_method_combo", None)
+        return {
+            "interface": self.interface.get_name(),
+            "interface_id": f"{type(self.interface).__module__}.{type(self.interface).__name__}",
+            "folder": folder,
+            "measuring_mode": self._mode_label(self.current_mode),
+            "beam_change_method": method.currentText() if method is not None and method.count() else None,
+            "actuators": [str(name) for name in correctors],
+            "correctors": [str(name) for name in correctors if name not in self.mover_names],
+            "quadrupole_movers": [str(name) for name in correctors if name in self.mover_names],
+            "bpms": [str(name) for name in bpms],
+            "corrector_unit": self.corrs_unit,
+            "bpm_unit": self.bpm_unit,
+            "initial_hkick": text("initial_hkick_settings"),
+            "initial_vkick": text("initial_vkick_settings"),
+            "target_orbit_excursion": [value("horizontal_excursion_spinbox"), value("vertical_excursion_spinbox")],
+            "max_current": [value("max_horizontal_current_spinbox"), value("max_vertical_current_spinbox")],
+            "mover_initial_um": [initial_x, initial_y],
+            "mover_max_range_um": [range_x, range_y],
+            "niter": int(niter),
+            "bpm_samples": int(getattr(self.interface, "nsamples", 1) or 1),
+            "mover_tolerance_um": MOVER_TOLERANCE_UM,
+            "low_snr_flag": LOW_SNR,
+            "code": code_versions(),
+        }
+
+    def _begin_record(self, correctors, bpms, niter, folder):
+        try:
+            resumed = any(name.startswith("DATA_") for name in os.listdir(folder))
+            record = SysIDRecord(folder)
+            record.begin(self._settings_snapshot(correctors, bpms, niter, folder), resumed)
+            print(f"SysID record: {record.path}" + (" (resumed run)" if resumed else ""))
+            return record
+        except Exception as exc:  # the record must never stop the measurement
+            print(f"WARNING: SysID settings not recorded ({exc})")
+            return None
+
+    def _launch_worker(self, correctors, bpms):
+        # Everything printed from here (mode change, restore, excitations) also goes to sysid_log.txt.
+        try:
+            install_log(self.mode_dirs[self.modes_to_do[self.counter]])
+        except Exception as exc:
+            print(f"WARNING: no sysid_log.txt ({exc})")
+        started = False
+        try:
+            started = super()._launch_worker(correctors, bpms)
+        finally:
+            if not started:
+                remove_log()
+        return started
+
+    def _on_mode_finished(self):
+        super()._on_mode_finished()
+        if self.worker is None:  # no further mode was started
+            remove_log()
+
+    def _pick_and_load_data_dir(self):
+        super()._pick_and_load_data_dir()
+        folder = os.path.expanduser(os.path.expandvars(self.working_directory_input.text()))
+        try:
+            record = read_record(folder) if folder else None
+        except Exception as exc:
+            QMessageBox.warning(self, "SysID settings", f"Could not read the settings record:\n{exc}")
+            return
+        if record:
+            message = self._restore_settings(record)
+            print(message.replace("\n", " | "))
+            QMessageBox.information(self, "SysID settings", message)
+
+    def _restore_settings(self, record):
+        s = record.get("settings") or {}
+        restored, missing = [], []
+        for widget, key in (("initial_hkick_settings", "initial_hkick"), ("initial_vkick_settings", "initial_vkick")):
+            if s.get(key) is not None:
+                getattr(self, widget).setText(str(s[key]))
+                restored.append(key)
+        for widgets, key in ((("horizontal_excursion_spinbox", "vertical_excursion_spinbox"), "target_orbit_excursion"),
+                             (("max_horizontal_current_spinbox", "max_vertical_current_spinbox"), "max_current"),
+                             (("mover_range_x_spinbox", "mover_range_y_spinbox"), "mover_max_range_um")):
+            values = s.get(key) or []
+            for widget, value in zip(widgets, values):
+                if value is not None:
+                    getattr(self, widget).setValue(float(value))
+            if values:
+                restored.append(key)
+        for widget, value in ((self.mover_initial_x_input, (s.get("mover_initial_um") or [None, None])[0]),
+                              (self.mover_initial_y_input, (s.get("mover_initial_um") or [None, None])[1])):
+            if value is not None:
+                widget.setText(f"{float(value):g}")
+        if s.get("niter") is not None:
+            self.niter_number.setText(str(s["niter"]))
+            restored.append("niter")
+        if s.get("bpm_samples") and hasattr(self, "nsamples_input"):
+            self.nsamples_input.setText(str(int(s["bpm_samples"])))
+            restored.append("bpm_samples")
+        if s.get("interface") and s["interface"] != self.interface.get_name():
+            missing.append(f"recorded on {s['interface']}, this window uses {self.interface.get_name()}")
+        runs = record.get("runs") or []
+        lines = [f"Settings restored from {os.path.basename(os.path.normpath(s.get('folder') or ''))}: "
+                 + ", ".join(restored) + " (and the actuator and BPM selection)."]
+        if runs:
+            last = runs[-1]
+            lines.append(f"Last run: started {last.get('started_at')}, ended {last.get('ended_at', 'never (program did not finish)')}, "
+                         f"{last.get('status')}, {last.get('pairs_measured', 0)} pair(s) measured"
+                         + (f" - {last['reason']}" if last.get("reason") else ""))
+        weak = [e for e in record.get("excitations", []) if (e.get("best_snr") or {}).get("snr", 99) < LOW_SNR]
+        if weak:
+            lines.append(f"Excitations with signal/noise below {LOW_SNR:g}: "
+                         + ", ".join(f"{e['actuator']}{':' + e['axis'] if e.get('axis') else ''}" for e in weak[:15])
+                         + (" ..." if len(weak) > 15 else ""))
+        lines += [f"Note: {m}" for m in missing]
+        return "\n".join(lines)
 
     def _window_title_prefix(self):
         return "SYSID Correctors + QM"
